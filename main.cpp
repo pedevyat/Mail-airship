@@ -1,3 +1,10 @@
+#ifdef _WIN32
+    #define WIN32_LEAN_AND_MEAN
+    #include <windows.h>
+#endif
+
+// Для OpenGL
+#include <GL/glew.h>
 #include <SFML/Window.hpp>
 #include <SFML/Graphics.hpp>
 #include <SFML/OpenGL.hpp>
@@ -10,6 +17,8 @@
 #include <cstdlib>
 #include <ctime>
 #include <string>
+
+
 
 // Структуры для хранения данных
 struct Vertex {
@@ -672,6 +681,7 @@ void updateBalloons(float deltaTime) {
 }
 
 int main() {
+	setlocale(LC_ALL, "ru_RU.UTF-8");
     // Настройки OpenGL
     sf::ContextSettings settings;
     settings.depthBits = 24;
@@ -682,17 +692,23 @@ int main() {
 
     // Создание окна
     sf::Window window(sf::VideoMode({static_cast<unsigned int>(width), static_cast<unsigned int>(height)}),
-                     "Mail-Airship - Доставка посылок",
-                     sf::Style::Default,
-                     settings);
+                 "Mail-Airship - Доставка посылок",
+                 sf::State::Windowed,  // ← ИЗМЕНИТЕ НА ЭТО
+                 settings);
 
     window.setVerticalSyncEnabled(true);
+	
+	glewExperimental = GL_TRUE;
+	if (glewInit() != GLEW_OK) {
+    std::cerr << "Failed to initialize GLEW" << std::endl;
+    return -1;
+}
 
     // Инициализация OpenGL
-    if (!gladLoadGL()) {
+   /*if (!gladLoadGL()) {
         std::cerr << "Failed to initialize OpenGL context" << std::endl;
         return -1;
-    }
+    }*/
 
     // Настройка OpenGL
     glViewport(0, 0, width, height);
@@ -750,13 +766,12 @@ int main() {
         projection = glm::perspective(glm::radians(60.0f), (float)width / (float)height, 0.1f, 500.0f);
 
         // Настройка камеры (сзади сверху дирижабля)
-        glm::vec3 cameraOffset = glm::vec3(
-            sin(airshipYaw) * 10.0f,
-            5.0f,
-            cos(airshipYaw) * 10.0f
-        );
-        glm::vec3 cameraPos = airshipPos + cameraOffset;
-        glm::vec3 cameraTarget = airshipPos;
+        glm::vec3 cameraPos = airshipPos + glm::vec3(0.0f, 2.0f, 0.0f); // Немного выше центра
+glm::vec3 cameraTarget = cameraPos + glm::vec3(
+    sin(airshipYaw), 
+    0.0f, 
+    cos(airshipYaw)
+);
         view = glm::lookAt(cameraPos, cameraTarget, glm::vec3(0.0f, 1.0f, 0.0f));
 
         // Рендеринг поля
@@ -783,8 +798,8 @@ int main() {
         airshipMatrix = glm::translate(airshipMatrix, airshipPos);
         airshipMatrix = glm::rotate(airshipMatrix, airshipYaw, glm::vec3(0.0f, 1.0f, 0.0f));
         // Легкое покачивание
-        airshipMatrix = glm::rotate(airshipMatrix, sin(timeElapsed) * 0.02f, glm::vec3(1.0f, 0.0f, 0.0f));
-        airshipMatrix = glm::rotate(airshipMatrix, cos(timeElapsed * 1.3f) * 0.02f, glm::vec3(0.0f, 0.0f, 1.0f));
+        airshipMatrix = glm::rotate(airshipMatrix, float(sin(timeElapsed) * 0.02f), glm::vec3(1.0f, 0.0f, 0.0f));
+		airshipMatrix = glm::rotate(airshipMatrix, float(cos(timeElapsed * 1.3f) * 0.02f), glm::vec3(0.0f, 0.0f, 1.0f));
         renderModel(airshipModel, airshipMatrix, airshipModel.baseColor);
 
         // Отображение

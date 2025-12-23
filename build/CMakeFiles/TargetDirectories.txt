@@ -1,0 +1,3 @@
+C:/GitHub/Mail-airship/build/CMakeFiles/MailAirship.dir
+C:/GitHub/Mail-airship/build/CMakeFiles/edit_cache.dir
+C:/GitHub/Mail-airship/build/CMakeFiles/rebuild_cache.dir
