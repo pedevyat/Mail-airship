@@ -56,6 +56,13 @@ glm::vec3 airshipPos = glm::vec3(0.0f, 15.0f, 0.0f);
 float airshipYaw = 0.0f;
 float airshipSpeed = 15.0f;
 
+// ДОБАВЛЕНО: Режим камеры
+enum CameraMode {
+    CAMERA_FOLLOW,    // Камера сзади сверху
+    CAMERA_AIM        // Камера прицеливания (снизу)
+};
+CameraMode cameraMode = CAMERA_FOLLOW;
+
 // Шейдерные программы
 GLuint shaderProgram;
 GLuint cloudShaderProgram;
@@ -83,6 +90,38 @@ void processInput(sf::Window& window, float deltaTime);
 void updateClouds(float deltaTime);
 void updateBalloons(float deltaTime);
 GLuint createShaderProgram(const std::string& vertexSource, const std::string& fragmentSource);
+
+// ДОБАВЛЕНО: Функция обновления камеры
+void updateCamera() {
+    switch (cameraMode) {
+        case CAMERA_FOLLOW: {
+            // Камера сзади сверху дирижабля (оригинальный режим)
+            glm::vec3 cameraPos = airshipPos + glm::vec3(0.0f, 2.0f, 0.0f); // Немного выше центра
+            glm::vec3 cameraTarget = cameraPos + glm::vec3(
+                sin(airshipYaw), 
+                0.0f, 
+                cos(airshipYaw)
+            );
+            view = glm::lookAt(cameraPos, cameraTarget, glm::vec3(0.0f, 1.0f, 0.0f));
+            break;
+        }
+        
+        case CAMERA_AIM: {
+            // Камера прицеливания снизу дирижабля
+            // Позиция камеры под дирижаблем, немного сзади
+            glm::mat4 rotationMatrix = glm::rotate(glm::mat4(1.0f), airshipYaw, glm::vec3(0.0f, 1.0f, 0.0f));
+            glm::vec4 cameraOffset = rotationMatrix * glm::vec4(0.0f, -1.5f, -1.0f, 1.0f);
+            glm::vec3 cameraPos = airshipPos + glm::vec3(cameraOffset);
+            
+            // Направление взгляда - вниз и вперед по курсу дирижабля
+            glm::vec4 lookOffset = rotationMatrix * glm::vec4(0.0f, -0.8f, 1.0f, 0.0f);
+            glm::vec3 cameraTarget = cameraPos + glm::normalize(glm::vec3(lookOffset)) * 10.0f;
+            
+            view = glm::lookAt(cameraPos, cameraTarget, glm::vec3(0.0f, 1.0f, 0.0f));
+            break;
+        }
+    }
+}
 
 // Функция создания шейдерной программы
 GLuint createShaderProgram(const std::string& vertexSource, const std::string& fragmentSource) {
@@ -167,19 +206,62 @@ std::string mainFragmentShader = R"(
     uniform vec3 lightColor;
     uniform vec3 viewPos;
     uniform bool useSpotlight;
+    
+    // Параметры прожектора
+    uniform vec3 spotlightPos;
+    uniform vec3 spotlightDir;
+    uniform vec3 spotlightColor;
+    uniform float spotlightCutoff;
+    uniform float spotlightOuterCutoff;
 
     void main() {
-        // Основное освещение
+        // Основное освещение (солнце)
         vec3 norm = normalize(Normal);
         vec3 lightDirection = normalize(-lightDir);
         float diff = max(dot(norm, lightDirection), 0.0);
         vec3 diffuse = diff * lightColor;
 
         // Фоновое освещение
-        vec3 ambient = 0.3 * lightColor;
+        vec3 ambient = 0.2 * lightColor;
+
+        // Прожекторный источник света
+        vec3 spotlightEffect = vec3(0.0);
+        
+        if (useSpotlight) {
+            // Вектор от прожектора к фрагменту
+            vec3 lightToFrag = normalize(FragPos - spotlightPos);
+            
+            // Угол между направлением прожектора и вектором к фрагменту
+            float theta = dot(lightToFrag, normalize(-spotlightDir));
+            
+            // Проверяем, находится ли фрагмент внутри конуса света
+            if (theta > spotlightOuterCutoff) {
+                // Интенсивность (плавное затухание от центра к краям)
+                float epsilon = spotlightCutoff - spotlightOuterCutoff;
+                float intensity = clamp((theta - spotlightOuterCutoff) / epsilon, 0.0, 1.0);
+                
+                // Расстояние до прожектора
+                float distance = length(FragPos - spotlightPos);
+                float attenuation = 1.0 / (1.0 + 0.1 * distance + 0.01 * distance * distance);
+                
+                // Освещение от прожектора
+                float spotlightDiff = max(dot(norm, -lightToFrag), 0.0);
+                
+                // Яркость в центре конуса
+                float centerBoost = 1.0;
+                if (theta > spotlightCutoff) {
+                    centerBoost = 1.5; // На 50% ярче в центре
+                }
+                
+                spotlightEffect = spotlightDiff * spotlightColor * intensity * attenuation * centerBoost;
+                
+                // Добавляем небольшое рассеянное освещение от прожектора
+                spotlightEffect += spotlightColor * 0.1 * intensity * attenuation;
+            }
+        }
 
         // Финальный цвет
-        vec3 result = (ambient + diffuse) * Color;
+        vec3 result = (ambient + diffuse + spotlightEffect) * Color;
         FragColor = vec4(result, 1.0);
     }
 )";
@@ -218,18 +300,24 @@ std::string cloudFragmentShader = R"(
 
     uniform float time;
     uniform bool isFlashing;
+    uniform mat4 model;
 
     void main() {
-        vec3 color = Color;
-
-        // Мерцание для туч
+        // Градиент: темнее снизу, светлее сверху
+        vec3 worldPos = vec3(model * vec4(FragPos, 1.0));
+        float gradient = clamp(worldPos.y * 0.1 + 0.7, 0.5, 1.0);
+        
+        vec3 baseColor = vec3(0.6, 0.6, 0.65) * gradient;
+        
+        // Мерцание
         if (isFlashing) {
-            float flash = sin(time * 30.0) * 0.5 + 0.5;
-            color = mix(color, vec3(1.0, 1.0, 0.8), flash * 0.5);
+            float flash = sin(time * 40.0) * 0.5 + 0.5;
+            baseColor = mix(baseColor, vec3(1.0, 1.0, 0.7), flash * 0.6);
         }
-
-        // Прозрачность для туч
-        FragColor = vec4(color, 0.7);
+        
+        // Немного прозрачности по краям
+        float edge = 1.0 - smoothstep(0.0, 1.0, length(FragPos) / 3.0);
+        FragColor = vec4(baseColor, 0.85 - edge * 0.2);
     }
 )";
 
@@ -262,22 +350,23 @@ Model createTreeModel() {
     model.baseColor = glm::vec3(0.0f, 0.5f, 0.0f);
     model.hasIndices = true;
 
-    // Простая пирамида для ёлки
-    float height = 8.0f;
-    float base = 3.0f;
+    // УВЕЛИЧЕННЫЕ РАЗМЕРЫ ЁЛКИ
+    float height = 15.0f;     // Было 8.0f - увеличили высоту
+    float base = 5.0f;        // Было 3.0f - увеличили основание
 
-    // Вершины для пирамиды
+    // Вершины для пирамиды (ёлки)
     Vertex vertices[] = {
-        // Основание
+        // Основание (больше)
         {{-base, 0.0f, -base}, {0.0f, -1.0f, 0.0f}, {0.0f, 0.3f, 0.0f}},
         {{base, 0.0f, -base}, {0.0f, -1.0f, 0.0f}, {0.0f, 0.3f, 0.0f}},
         {{base, 0.0f, base}, {0.0f, -1.0f, 0.0f}, {0.0f, 0.3f, 0.0f}},
         {{-base, 0.0f, base}, {0.0f, -1.0f, 0.0f}, {0.0f, 0.3f, 0.0f}},
 
-        // Вершина
+        // Вершина (выше)
         {{0.0f, height, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.7f, 0.0f}}
     };
 
+    // Индексы (остаются те же)
     unsigned int indices[] = {
         // Боковые грани
         0, 1, 4,
@@ -349,13 +438,13 @@ Model createAirshipModel() {
 
 Model createCloudModel() {
     Model model;
-    model.baseColor = glm::vec3(0.9f, 0.9f, 0.9f);
+    model.baseColor = glm::vec3(0.7f, 0.7f, 0.7f);  // БЫЛО: (0.9f, 0.9f, 0.9f) - ТЕМНЕЕ
     model.hasIndices = true;
 
-    // Простая сфера для тучи
-    float radius = 2.0f;
-    int slices = 8;
-    int stacks = 8;
+    // Простая сфера для тучи - УВЕЛИЧИМ РАДИУС
+    float radius = 3.0f;  // БЫЛО: 2.0f - БОЛЬШЕ
+    int slices = 12;      // БЫЛО: 8 - БОЛЬШЕ ДЕТАЛЕЙ
+    int stacks = 12;      // БЫЛО: 8 - БОЛЬШЕ ДЕТАЛЕЙ
 
     for (int i = 0; i <= stacks; ++i) {
         float phi = (float)i / stacks * glm::pi<float>();
@@ -371,13 +460,13 @@ Model createCloudModel() {
             );
 
             v.normal = glm::normalize(v.position);
-            v.color = glm::vec3(0.9f, 0.9f, 0.9f);
+            v.color = glm::vec3(0.7f, 0.7f, 0.7f);  // ТЕМНЫЙ СЕРЫЙ
 
             model.vertices.push_back(v);
         }
     }
 
-    // Индексы
+    // Индексы (остаётся тот же код)
     for (int i = 0; i < stacks; ++i) {
         for (int j = 0; j < slices; ++j) {
             int first = i * (slices + 1) + j;
@@ -501,14 +590,61 @@ void renderModel(const Model& model, const glm::mat4& modelMatrix, const glm::ve
     GLuint lightColorLoc = glGetUniformLocation(shaderProgram, "lightColor");
     GLuint viewPosLoc = glGetUniformLocation(shaderProgram, "viewPos");
     GLuint spotlightLoc = glGetUniformLocation(shaderProgram, "useSpotlight");
+    
+    // Новые переменные для прожектора
+    GLuint spotlightPosLoc = glGetUniformLocation(shaderProgram, "spotlightPos");
+    GLuint spotlightDirLoc = glGetUniformLocation(shaderProgram, "spotlightDir");
+    GLuint spotlightColorLoc = glGetUniformLocation(shaderProgram, "spotlightColor");
+    GLuint spotlightCutoffLoc = glGetUniformLocation(shaderProgram, "spotlightCutoff");
+    GLuint spotlightOuterCutoffLoc = glGetUniformLocation(shaderProgram, "spotlightOuterCutoff");
 
     glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(modelMatrix));
     glUniformMatrix4fv(viewLoc, 1, GL_FALSE, glm::value_ptr(view));
     glUniformMatrix4fv(projLoc, 1, GL_FALSE, glm::value_ptr(projection));
     glUniform3f(lightDirLoc, -0.5f, -1.0f, -0.3f);
     glUniform3f(lightColorLoc, 1.0f, 1.0f, 0.95f);
-    glUniform3f(viewPosLoc, airshipPos.x, airshipPos.y, airshipPos.z);
+    
+    // Устанавливаем позицию камеры в зависимости от режима
+    glm::vec3 cameraPosForShaders;
+    if (cameraMode == CAMERA_FOLLOW) {
+        cameraPosForShaders = airshipPos + glm::vec3(0.0f, 2.0f, 0.0f);
+    } else {
+        // В режиме прицеливания - позиция камеры снизу дирижабля
+        glm::mat4 rotationMatrix = glm::rotate(glm::mat4(1.0f), airshipYaw, glm::vec3(0.0f, 1.0f, 0.0f));
+        glm::vec4 cameraOffset = rotationMatrix * glm::vec4(0.0f, -1.5f, -1.0f, 1.0f);
+        cameraPosForShaders = airshipPos + glm::vec3(cameraOffset);
+    }
+    glUniform3f(viewPosLoc, cameraPosForShaders.x, cameraPosForShaders.y, cameraPosForShaders.z);
+    
     glUniform1i(spotlightLoc, spotlightOn ? 1 : 0);
+    
+    // Параметры прожектора
+    // Позиция прожектора (под дирижаблем, немного сзади)
+    glm::vec3 spotlightPosition;
+    glm::vec3 spotlightDirection;
+    
+    if (spotlightOn) {
+        // Матрица поворота дирижабля
+        glm::mat4 rotationMatrix = glm::rotate(glm::mat4(1.0f), airshipYaw, glm::vec3(0.0f, 1.0f, 0.0f));
+        
+        // Смещение прожектора относительно дирижабля (вниз и сзади)
+        glm::vec4 offsetPos = rotationMatrix * glm::vec4(0.0f, -1.5f, -2.0f, 1.0f);
+        spotlightPosition = airshipPos + glm::vec3(offsetPos);
+        
+        // Направление прожектора (вниз и немного вперед)
+        glm::vec4 offsetDir = rotationMatrix * glm::vec4(0.0f, -1.0f, 0.2f, 0.0f);
+        spotlightDirection = glm::normalize(glm::vec3(offsetDir));
+    } else {
+        // Если прожектор выключен, отправляем нулевые значения
+        spotlightPosition = glm::vec3(0.0f);
+        spotlightDirection = glm::vec3(0.0f, -1.0f, 0.0f);
+    }
+    
+    glUniform3f(spotlightPosLoc, spotlightPosition.x, spotlightPosition.y, spotlightPosition.z);
+    glUniform3f(spotlightDirLoc, spotlightDirection.x, spotlightDirection.y, spotlightDirection.z);
+    glUniform3f(spotlightColorLoc, 1.0f, 1.0f, 0.9f); // Теплый белый свет
+    glUniform1f(spotlightCutoffLoc, cos(glm::radians(15.0f))); // Угол 15 градусов
+    glUniform1f(spotlightOuterCutoffLoc, cos(glm::radians(25.0f))); // Внешний угол 25 градусов
 
     // Создание VBO и VAO
     GLuint VAO, VBO, EBO;
@@ -553,7 +689,7 @@ void renderCloud(const Cloud& cloud) {
 
     glm::mat4 modelMatrix = glm::mat4(1.0f);
     modelMatrix = glm::translate(modelMatrix, cloud.position);
-    modelMatrix = glm::scale(modelMatrix, glm::vec3(2.0f, 1.0f, 2.0f));
+    modelMatrix = glm::scale(modelMatrix, glm::vec3(3.0f, 2.0f, 3.0f));
 
     // Установка uniform-переменных
     GLuint modelLoc = glGetUniformLocation(cloudShaderProgram, "model");
@@ -629,6 +765,17 @@ void processInput(sf::Window& window, float deltaTime) {
                 spotlightOn = !spotlightOn;
                 std::cout << "Прожектор: " << (spotlightOn ? "ВКЛ" : "ВЫКЛ") << std::endl;
             }
+            
+            // ДОБАВЛЕНО: Переключение режима камеры по клавише V
+            if (keyEvent->scancode == sf::Keyboard::Scan::V) {
+                if (cameraMode == CAMERA_FOLLOW) {
+                    cameraMode = CAMERA_AIM;
+                    std::cout << "Режим камеры: ПРИЦЕЛИВАНИЕ (вид снизу)" << std::endl;
+                } else {
+                    cameraMode = CAMERA_FOLLOW;
+                    std::cout << "Режим камеры: СЛЕДОВАНИЕ (вид сзади)" << std::endl;
+                }
+            }
         }
     }
 
@@ -693,7 +840,7 @@ int main() {
     // Создание окна
     sf::Window window(sf::VideoMode({static_cast<unsigned int>(width), static_cast<unsigned int>(height)}),
                  "Mail-Airship - Доставка посылок",
-                 sf::State::Windowed,  // ← ИЗМЕНИТЕ НА ЭТО
+                 sf::State::Windowed,
                  settings);
 
     window.setVerticalSyncEnabled(true);
@@ -703,12 +850,6 @@ int main() {
     std::cerr << "Failed to initialize GLEW" << std::endl;
     return -1;
 }
-
-    // Инициализация OpenGL
-   /*if (!gladLoadGL()) {
-        std::cerr << "Failed to initialize OpenGL context" << std::endl;
-        return -1;
-    }*/
 
     // Настройка OpenGL
     glViewport(0, 0, width, height);
@@ -724,6 +865,7 @@ int main() {
     std::cout << "  SPACE/SHIFT - вверх/вниз" << std::endl;
     std::cout << "  Стрелки влево/вправо - поворот" << std::endl;
     std::cout << "  F - включить/выключить прожектор" << std::endl;
+    std::cout << "  V - переключить режим камеры" << std::endl;  // ДОБАВЛЕНО
     std::cout << "  ESC - выход" << std::endl;
 
     // Создание шейдеров
@@ -765,14 +907,8 @@ int main() {
         // Настройка проекции
         projection = glm::perspective(glm::radians(60.0f), (float)width / (float)height, 0.1f, 500.0f);
 
-        // Настройка камеры (сзади сверху дирижабля)
-        glm::vec3 cameraPos = airshipPos + glm::vec3(0.0f, 2.0f, 0.0f); // Немного выше центра
-glm::vec3 cameraTarget = cameraPos + glm::vec3(
-    sin(airshipYaw), 
-    0.0f, 
-    cos(airshipYaw)
-);
-        view = glm::lookAt(cameraPos, cameraTarget, glm::vec3(0.0f, 1.0f, 0.0f));
+        // ДОБАВЛЕНО: Обновление камеры (вызов новой функции)
+        updateCamera();
 
         // Рендеринг поля
         glm::mat4 groundMatrix = glm::mat4(1.0f);
